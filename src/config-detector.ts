@@ -4,6 +4,7 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { logger } from './utils/logger.js';
 
 export interface ClangdConfig {
@@ -15,6 +16,68 @@ export interface ClangdConfig {
 }
 
 /**
+ * Detect if project is a Chromium project by checking for bundled clangd
+ * Only consider it a Chromium project if the bundled clangd exists,
+ * since that's what we need for Chromium-specific behavior
+ */
+function detectChromiumProject(projectRoot: string): boolean {
+  const chromiumClangdPaths = [
+    'third_party/llvm-build/Release+Asserts/bin/clangd',
+    'third_party/llvm-build/Release/bin/clangd',
+  ];
+
+  return chromiumClangdPaths.some(path =>
+    existsSync(join(projectRoot, path))
+  );
+}
+
+/**
+ * Get clangd version string
+ */
+function getClangdVersion(clangdPath: string): string | undefined {
+  try {
+    const result = spawnSync(clangdPath, ['--version'], {
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+
+    if (result.status === 0 && result.stdout) {
+      // Extract version from output like "clangd version 18.1.3" or "clangd version 22.0.0git"
+      const match = result.stdout.match(/clangd version ([\d.]+\w*)/);
+      if (match) {
+        return match[1];
+      }
+    }
+  } catch (error) {
+    logger.debug('Failed to get clangd version:', error);
+  }
+  return undefined;
+}
+
+/**
+ * Find project's bundled clangd binary
+ * Currently supports auto-detection for Chromium projects
+ */
+function findProjectBundledClangd(projectRoot: string, isChromiumProject: boolean): string | undefined {
+  // Auto-detect Chromium bundled clangd
+  if (isChromiumProject) {
+    const searchPaths = [
+      'third_party/llvm-build/Release+Asserts/bin/clangd',
+      'third_party/llvm-build/Release/bin/clangd',
+    ];
+
+    for (const searchPath of searchPaths) {
+      const fullPath = join(projectRoot, searchPath);
+      if (existsSync(fullPath)) {
+        return fullPath;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Detect project configuration and generate appropriate clangd settings
  */
 export function detectConfiguration(): ClangdConfig {
@@ -22,14 +85,47 @@ export function detectConfiguration(): ClangdConfig {
   const projectRoot = resolve(process.env.PROJECT_ROOT || process.cwd());
   logger.info('Project root:', projectRoot);
 
-  // Find clangd binary
-  const clangdPath = process.env.CLANGD_PATH || 'clangd';
-  logger.info('Clangd path:', clangdPath);
-
-  // Check if this is a Chromium project
-  const isChromiumProject = existsSync(join(projectRoot, '.gclient'));
+  // Check if this is a Chromium project using multiple detection strategies
+  const isChromiumProject = detectChromiumProject(projectRoot);
   if (isChromiumProject) {
     logger.info('Detected Chromium project');
+  }
+
+  // Find clangd binary
+  let clangdPath: string;
+  let projectClangd: string | undefined;
+  if (process.env.CLANGD_PATH) {
+    clangdPath = process.env.CLANGD_PATH;
+    logger.info('Using clangd from CLANGD_PATH:', clangdPath);
+  } else {
+    projectClangd = findProjectBundledClangd(projectRoot, isChromiumProject);
+    if (projectClangd) {
+      clangdPath = projectClangd;
+      logger.info('Using Chromium bundled clangd:', clangdPath);
+    } else if (isChromiumProject) {
+      clangdPath = 'clangd';
+      logger.warn('Chromium project detected but bundled clangd not found, falling back to system clangd');
+      logger.warn('Consider setting CLANGD_PATH to third_party/llvm-build/Release+Asserts/bin/clangd');
+    } else {
+      clangdPath = 'clangd';
+      logger.info('Using system clangd from PATH');
+    }
+  }
+
+  // Detect and log clangd version
+  const version = getClangdVersion(clangdPath);
+  if (version) {
+    logger.info(`Clangd version: ${version}`);
+
+    // Warn if using old system clangd for Chromium
+    if (isChromiumProject && !projectClangd && version) {
+      const majorVersion = parseInt(version.split('.')[0]);
+      if (majorVersion < 20) {
+        logger.warn(`Using older system clangd (${version}) for Chromium project. Consider using the bundled clangd (v22+) via CLANGD_PATH`);
+      }
+    }
+  } else {
+    logger.warn('Could not detect clangd version');
   }
 
   // Find compile_commands.json

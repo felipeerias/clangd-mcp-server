@@ -30,7 +30,7 @@ See existing tools (find-definition.ts, find-references.ts) for examples.
 - **ClangdManager** (src/clangd-manager.ts): Subprocess lifecycle, auto-restart on crash (max 3 attempts)
 - **LSPClient** (src/lsp-client.ts): JSON-RPC over stdio, Content-Length framing, request correlation
 - **FileTracker** (src/file-tracker.ts): Manages didOpen/didClose, prevents duplicates
-- **ConfigDetector** (src/config-detector.ts): Auto-detects compile_commands.json and Chromium projects
+- **ConfigDetector** (src/config-detector.ts): Auto-detects compile_commands.json, project type detection, and project bundled clangd (Chromium auto-detected, others via CLANGD_PATH)
 
 Data flow: MCP request → index.ts routes → FileTracker opens file → LSPClient sends request → format response
 
@@ -40,6 +40,7 @@ Data flow: MCP request → index.ts routes → FileTracker opens file → LSPCli
 - **Lazy initialization**: clangd starts on first query, not at server startup
 - **ES modules**: Required by MCP SDK, all imports need .js extension
 - **Retry logic**: Exponential backoff for transient LSP errors (100ms → 200ms → 400ms, max 3 attempts)
+- **Project bundled clangd**: Auto-detects project bundled clangd (Chromium supported via `.gclient` detection) and allows manual specification via `CLANGD_PATH` for other projects, with version validation and warnings
 
 ## License
 

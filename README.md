@@ -45,6 +45,13 @@ brew install llvm
 **From LLVM releases:**
 Download from https://github.com/clangd/clangd/releases
 
+**Large projects with bundled clangd:**
+Some large projects bundle their own clangd for version consistency:
+- **Chromium**: Automatically detected at `third_party/llvm-build/Release+Asserts/bin/clangd`
+- **Other projects**: Use `CLANGD_PATH` environment variable to specify the bundled clangd location
+
+The MCP server automatically uses the bundled version when detected, ensuring version compatibility.
+
 ## Installation
 
 ### Option 1: Install from npm (when published)
@@ -109,21 +116,37 @@ Configure the server behavior using environment variables:
 |----------|-------------|---------|
 | `PROJECT_ROOT` | Project workspace root directory | Current working directory |
 | `COMPILE_COMMANDS_DIR` | Explicit path to directory containing compile_commands.json | Auto-detected |
-| `CLANGD_PATH` | Path to clangd binary | `clangd` (from PATH) |
+| `CLANGD_PATH` | Path to clangd binary (overrides all auto-detection) | Auto-detected (see below) |
 | `CLANGD_ARGS` | Additional clangd arguments | Auto-configured based on project |
 | `CLANGD_LOG_LEVEL` | Clangd's internal log level | `error` |
 | `LOG_LEVEL` | MCP server log level (ERROR, WARN, INFO, DEBUG) | `INFO` |
 
+**Clangd Binary Auto-Detection (in order of precedence):**
+1. `CLANGD_PATH` environment variable (manual override for any clangd binary)
+2. Auto-detected project bundled clangd:
+   - **Chromium**: Automatically detects bundled clangd at:
+     - `third_party/llvm-build/Release+Asserts/bin/clangd`
+     - `third_party/llvm-build/Release/bin/clangd`
+3. System `clangd` from PATH
+
+The server logs which clangd binary and version is being used on startup.
+
 ### Advanced Examples
 
 ```json
-// Chromium project
+// Chromium project (auto-detects bundled clangd)
 {"mcpServers": {"clangd": {"command": "clangd-mcp-server", "env": {
   "PROJECT_ROOT": "/home/user/chromium/src",
   "COMPILE_COMMANDS_DIR": "/home/user/chromium/src/out/Default"
 }}}}
 
-// Custom clangd binary with args
+// Project with custom/bundled clangd
+{"mcpServers": {"clangd": {"command": "clangd-mcp-server", "env": {
+  "PROJECT_ROOT": "/home/user/myproject",
+  "CLANGD_PATH": "/home/user/myproject/tools/clangd/bin/clangd"
+}}}}
+
+// System clangd with custom args
 {"mcpServers": {"clangd": {"command": "clangd-mcp-server", "env": {
   "CLANGD_PATH": "/opt/homebrew/opt/llvm/bin/clangd",
   "CLANGD_ARGS": "--header-insertion=never --completion-style=detailed"
@@ -174,8 +197,9 @@ Background indexing is **disabled** (`--background-index=false`) because MCP mak
 |---------|-------------|----------|
 | **Clangd not found** | `spawn clangd ENOENT` | Install clangd or set `CLANGD_PATH` env var |
 | **Missing compile_commands.json** | `compile_commands.json not found` | Generate it (see Configuration) with CMake/GN/Bear |
+| **Wrong clangd version** | Warning about old clangd | The server auto-detects bundled clangd (e.g., Chromium). Check startup logs. Use `CLANGD_PATH` to override |
 | **Timeout** | `timed out after 30000ms` | File not in build, or clangd indexing (wait/retry), or check with `CLANGD_LOG_LEVEL=verbose` |
-| **Crashes** | `Max restart attempts reached` | Check clangd version, stderr logs, try different `CLANGD_ARGS`, validate compile_commands.json |
+| **Crashes** | `Max restart attempts reached` | Check clangd version (see startup logs), stderr logs, try different `CLANGD_ARGS`, validate compile_commands.json |
 
 **Enable verbose logging:**
 ```json

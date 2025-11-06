@@ -61,8 +61,12 @@ describe('Config detector', () => {
     process.chdir(originalCwd);
   });
 
-  it('should detect Chromium project via .gclient file', async () => {
-    writeFileSync(join(testDir, '.gclient'), '# Chromium gclient file');
+  it('should detect Chromium project with bundled clangd', async () => {
+    // Create bundled clangd
+    const clangdDir = join(testDir, 'third_party', 'llvm-build', 'Release+Asserts', 'bin');
+    mkdirSync(clangdDir, { recursive: true });
+    writeFileSync(join(clangdDir, 'clangd'), '#!/bin/bash\necho clangd');
+
     process.env.PROJECT_ROOT = testDir;
     jest.resetModules();
 
@@ -72,7 +76,7 @@ describe('Config detector', () => {
     expect(config.isChromiumProject).toBe(true);
   });
 
-  it('should not detect Chromium project without .gclient', async () => {
+  it('should not detect Chromium project without bundled clangd', async () => {
     process.env.PROJECT_ROOT = testDir;
     jest.resetModules();
 
@@ -258,5 +262,105 @@ describe('Config detector', () => {
 
     const logArg = config.clangdArgs.find((arg) => arg.startsWith('--log='));
     expect(logArg).toBe('--log=error');
+  });
+
+  it('should use Chromium bundled clangd when available', async () => {
+    // Create Chromium project with bundled clangd
+    const clangdDir = join(testDir, 'third_party', 'llvm-build', 'Release+Asserts', 'bin');
+    mkdirSync(clangdDir, { recursive: true });
+    const chromiumClangd = join(clangdDir, 'clangd');
+    writeFileSync(chromiumClangd, '#!/bin/bash\necho clangd');
+
+    process.env.PROJECT_ROOT = testDir;
+    jest.resetModules();
+
+    const { detectConfiguration } = await import('../../src/config-detector.js');
+    const config = detectConfiguration();
+
+    expect(config.isChromiumProject).toBe(true);
+    expect(config.clangdPath).toBe(chromiumClangd);
+  });
+
+  it('should use system clangd when bundled clangd not found', async () => {
+    // No bundled clangd present
+    process.env.PROJECT_ROOT = testDir;
+    jest.resetModules();
+
+    const { detectConfiguration } = await import('../../src/config-detector.js');
+    const config = detectConfiguration();
+
+    expect(config.isChromiumProject).toBe(false);
+    expect(config.clangdPath).toBe('clangd');
+  });
+
+  it('should prefer CLANGD_PATH over Chromium bundled clangd', async () => {
+    // Create Chromium project with bundled clangd
+    const clangdDir = join(testDir, 'third_party', 'llvm-build', 'Release+Asserts', 'bin');
+    mkdirSync(clangdDir, { recursive: true });
+    writeFileSync(join(clangdDir, 'clangd'), '#!/bin/bash\necho clangd');
+
+    process.env.PROJECT_ROOT = testDir;
+    process.env.CLANGD_PATH = '/custom/clangd';
+    jest.resetModules();
+
+    const { detectConfiguration } = await import('../../src/config-detector.js');
+    const config = detectConfiguration();
+
+    expect(config.isChromiumProject).toBe(true);
+    expect(config.clangdPath).toBe('/custom/clangd');
+  });
+
+  describe('Chromium detection', () => {
+    it('should detect Chromium via bundled clangd', async () => {
+      // Create only the bundled clangd
+      const clangdDir = join(testDir, 'third_party', 'llvm-build', 'Release+Asserts', 'bin');
+      mkdirSync(clangdDir, { recursive: true });
+      writeFileSync(join(clangdDir, 'clangd'), '#!/bin/bash\necho clangd');
+
+      process.env.PROJECT_ROOT = testDir;
+      jest.resetModules();
+
+      const { detectConfiguration } = await import('../../src/config-detector.js');
+      const config = detectConfiguration();
+
+      expect(config.isChromiumProject).toBe(true);
+    });
+
+    it('should detect Chromium with bundled clangd in src/ subdirectory', async () => {
+      // Simulate real Chromium checkout with bundled clangd in src/
+      const srcDir = join(testDir, 'chromium', 'src');
+      mkdirSync(srcDir, { recursive: true });
+
+      // Add bundled clangd
+      const clangdDir = join(srcDir, 'third_party', 'llvm-build', 'Release+Asserts', 'bin');
+      mkdirSync(clangdDir, { recursive: true });
+      writeFileSync(join(clangdDir, 'clangd'), '#!/bin/bash\necho clangd');
+
+      // Open workspace in src/ directory (common case)
+      process.env.PROJECT_ROOT = srcDir;
+      jest.resetModules();
+
+      const { detectConfiguration } = await import('../../src/config-detector.js');
+      const config = detectConfiguration();
+
+      expect(config.isChromiumProject).toBe(true);
+      expect(config.clangdPath).toBe(join(clangdDir, 'clangd'));
+    });
+
+    it('should not detect Chromium without bundled clangd', async () => {
+      // Create Chromium-like structure but without bundled clangd
+      const dirs = ['base', 'chrome', 'content', 'third_party', 'tools/clang'];
+      for (const dir of dirs) {
+        mkdirSync(join(testDir, dir), { recursive: true });
+      }
+
+      process.env.PROJECT_ROOT = testDir;
+      jest.resetModules();
+
+      const { detectConfiguration } = await import('../../src/config-detector.js');
+      const config = detectConfiguration();
+
+      expect(config.isChromiumProject).toBe(false);
+    });
   });
 });

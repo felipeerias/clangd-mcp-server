@@ -11,10 +11,10 @@ npm run test:watch # Watch mode
 ## Coverage
 
 **Core modules tested** (~60% coverage, 95+ tests):
-- ✅ Utils (uri, errors, logger)
-- ✅ Config detector (bundled clangd, compile_commands.json)
-- ✅ LSP client (JSON-RPC, message framing, concurrent requests)
-- ✅ File tracker (didOpen/didClose, language detection)
+- Utils (uri, errors, logger)
+- Config detector (bundled clangd, compile_commands.json)
+- LSP client (JSON-RPC, message framing, concurrent requests)
+- File tracker (didOpen/didClose, language detection)
 
 **Not yet tested:**
 - Clangd manager (spawning, crash recovery)

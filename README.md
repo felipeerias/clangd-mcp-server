@@ -152,12 +152,14 @@ Claude Code uses these tools via natural language:
 
 ## Performance
 
-**Background indexing disabled by default** for lower memory (<500MB) and faster startup. Files indexed on-demand.
+**Background indexing disabled by default** for lower memory usage and faster startup. Files indexed on-demand when first accessed.
 
 **Tradeoffs:**
-- ✅ Low memory/CPU, fast startup (<5s)
-- ⚠️ `workspace_symbol_search` limited to opened files
-- ⚠️ First query/file: 5-15s; subsequent: 1-5s
+- Lower memory/CPU usage, faster startup
+- `workspace_symbol_search` limited to opened files
+- First query on a file will be slower as clangd indexes it on-demand; subsequent queries on the same file are faster
+
+**Note:** Performance varies significantly based on codebase size and complexity. Large codebases with extensive header dependencies (like Chromium) will require more memory and longer indexing times.
 
 **Enable for workspace-wide search** (costs GBs RAM, hours indexing):
 ```json

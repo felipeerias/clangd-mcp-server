@@ -11,12 +11,14 @@ export interface Position {
   character: number;
 }
 
+export interface Range {
+  start: Position;
+  end: Position;
+}
+
 export interface Location {
   uri: string;
-  range: {
-    start: Position;
-    end: Position;
-  };
+  range: Range;
 }
 
 /**
@@ -51,6 +53,80 @@ export const symbolKindNames: Record<number, string> = {
   25: 'Operator',
   26: 'TypeParameter'
 };
+
+/**
+ * LSP DiagnosticSeverity enumeration
+ */
+export enum DiagnosticSeverity {
+  Error = 1,
+  Warning = 2,
+  Information = 3,
+  Hint = 4
+}
+
+/**
+ * Related location information for diagnostics
+ */
+export interface DiagnosticRelatedInformation {
+  location: Location;
+  message: string;
+}
+
+/**
+ * LSP Diagnostic type
+ */
+export interface Diagnostic {
+  range: Range;
+  severity?: DiagnosticSeverity;
+  code?: number | string;
+  source?: string;
+  message: string;
+  relatedInformation?: DiagnosticRelatedInformation[];
+}
+
+/**
+ * Call hierarchy item from LSP
+ */
+export interface CallHierarchyItem {
+  name: string;
+  kind: number;
+  tags?: number[];
+  detail?: string;
+  uri: string;
+  range: Range;
+  selectionRange: Range;
+  data?: any;
+}
+
+/**
+ * Incoming call in call hierarchy
+ */
+export interface CallHierarchyIncomingCall {
+  from: CallHierarchyItem;
+  fromRanges: Range[];
+}
+
+/**
+ * Outgoing call in call hierarchy
+ */
+export interface CallHierarchyOutgoingCall {
+  to: CallHierarchyItem;
+  fromRanges: Range[];
+}
+
+/**
+ * Type hierarchy item from LSP
+ */
+export interface TypeHierarchyItem {
+  name: string;
+  kind: number;
+  tags?: number[];
+  detail?: string;
+  uri: string;
+  range: Range;
+  selectionRange: Range;
+  data?: any;
+}
 
 /**
  * Normalize LSP location result which can be Location | Location[] | null

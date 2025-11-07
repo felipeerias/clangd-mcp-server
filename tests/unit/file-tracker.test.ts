@@ -212,4 +212,122 @@ describe('FileTracker', () => {
       expect(openFiles.size).toBe(0);
     });
   });
+
+  describe('onFileClosed callback', () => {
+    it('should invoke callback when file is manually closed', async () => {
+      const closedUris: string[] = [];
+      tracker.onFileClosed((uri) => {
+        closedUris.push(uri);
+      });
+
+      await tracker.ensureFileOpen(testFile);
+      const uri = await tracker.ensureFileOpen(testFile);
+
+      tracker.closeFile(testFile);
+
+      expect(closedUris).toHaveLength(1);
+      expect(closedUris[0]).toBe(uri);
+    });
+
+    it('should invoke callback when file is evicted due to LRU', async () => {
+      const closedUris: string[] = [];
+      tracker.onFileClosed((uri) => {
+        closedUris.push(uri);
+      });
+
+      // Open max files + 1 to trigger eviction
+      const files: string[] = [];
+      for (let i = 0; i < 101; i++) {
+        const file = join(testDir, `file${i}.cpp`);
+        writeFileSync(file, `int x${i};`);
+        files.push(file);
+      }
+
+      // Open first 100 files
+      for (let i = 0; i < 100; i++) {
+        await tracker.ensureFileOpen(files[i]);
+      }
+
+      expect(closedUris).toHaveLength(0);
+
+      // Open 101st file, should evict oldest
+      await tracker.ensureFileOpen(files[100]);
+
+      expect(closedUris).toHaveLength(1);
+      expect(closedUris[0]).toMatch(/file0\.cpp/);
+    });
+
+    it('should invoke callback for each file when closeAll is called', async () => {
+      const closedUris: string[] = [];
+      tracker.onFileClosed((uri) => {
+        closedUris.push(uri);
+      });
+
+      const file1 = join(testDir, 'file1.cpp');
+      const file2 = join(testDir, 'file2.cpp');
+      const file3 = join(testDir, 'file3.cpp');
+      writeFileSync(file1, 'int x;');
+      writeFileSync(file2, 'int y;');
+      writeFileSync(file3, 'int z;');
+
+      await tracker.ensureFileOpen(file1);
+      await tracker.ensureFileOpen(file2);
+      await tracker.ensureFileOpen(file3);
+
+      tracker.closeAll();
+
+      expect(closedUris).toHaveLength(3);
+      expect(closedUris.every(uri => uri.startsWith('file://'))).toBe(true);
+    });
+
+    it('should not invoke callback when file is not open', () => {
+      const closedUris: string[] = [];
+      tracker.onFileClosed((uri) => {
+        closedUris.push(uri);
+      });
+
+      // Try to close a file that was never opened
+      tracker.closeFile(testFile);
+
+      expect(closedUris).toHaveLength(0);
+    });
+
+    it('should allow registering callback after files are opened', async () => {
+      // Open file first
+      await tracker.ensureFileOpen(testFile);
+
+      // Register callback after
+      const closedUris: string[] = [];
+      tracker.onFileClosed((uri) => {
+        closedUris.push(uri);
+      });
+
+      // Now close the file
+      tracker.closeFile(testFile);
+
+      expect(closedUris).toHaveLength(1);
+    });
+
+    it('should replace previous callback when onFileClosed is called again', async () => {
+      const closedUris1: string[] = [];
+      const closedUris2: string[] = [];
+
+      tracker.onFileClosed((uri) => {
+        closedUris1.push(uri);
+      });
+
+      await tracker.ensureFileOpen(testFile);
+
+      // Replace callback
+      tracker.onFileClosed((uri) => {
+        closedUris2.push(uri);
+      });
+
+      tracker.closeFile(testFile);
+
+      // Only second callback should be invoked
+      expect(closedUris1).toHaveLength(0);
+      expect(closedUris2).toHaveLength(1);
+    });
+  });
 });

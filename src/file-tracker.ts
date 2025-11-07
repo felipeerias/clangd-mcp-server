@@ -16,9 +16,17 @@ export class FileTracker {
   private inFlightOpens: Set<string> = new Set(); // URIs currently being opened
   private lspClient: LSPClient;
   private readonly maxOpenFiles: number = 100; // Maximum files to keep open
+  private onFileClosedCallback?: (uri: string) => void;
 
   constructor(lspClient: LSPClient) {
     this.lspClient = lspClient;
+  }
+
+  /**
+   * Register a callback that gets called when a file is closed
+   */
+  onFileClosed(callback: (uri: string) => void): void {
+    this.onFileClosedCallback = callback;
   }
 
   /**
@@ -85,6 +93,11 @@ export class FileTracker {
         textDocument: { uri: oldestUri }
       });
       this.openFiles.delete(oldestUri);
+
+      // Notify callback
+      if (this.onFileClosedCallback) {
+        this.onFileClosedCallback(oldestUri);
+      }
     }
   }
 
@@ -136,6 +149,12 @@ export class FileTracker {
     });
 
     this.openFiles.delete(uri);
+
+    // Notify callback
+    if (this.onFileClosedCallback) {
+      this.onFileClosedCallback(uri);
+    }
+
     logger.info('Closed file:', uri);
   }
 
@@ -149,6 +168,11 @@ export class FileTracker {
       this.lspClient.notify('textDocument/didClose', {
         textDocument: { uri }
       });
+
+      // Notify callback for each file
+      if (this.onFileClosedCallback) {
+        this.onFileClosedCallback(uri);
+      }
     }
 
     this.openFiles.clear();

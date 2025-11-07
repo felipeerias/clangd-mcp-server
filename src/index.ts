@@ -22,10 +22,14 @@ import { getHover } from './tools/get-hover.js';
 import { workspaceSymbolSearch } from './tools/workspace-symbol.js';
 import { findImplementations } from './tools/find-implementations.js';
 import { getDocumentSymbols } from './tools/document-symbols.js';
+import { getDiagnostics, DiagnosticsCache } from './tools/get-diagnostics.js';
+import { getCallHierarchy } from './tools/get-call-hierarchy.js';
+import { getTypeHierarchy } from './tools/get-type-hierarchy.js';
 
 // Global state
 let clangdManager: ClangdManager | null = null;
 let fileTracker: FileTracker | null = null;
+let diagnosticsCache: DiagnosticsCache | null = null;
 let initializationPromise: Promise<void> | null = null;
 let isShuttingDown: boolean = false;
 
@@ -71,6 +75,28 @@ function validateToolArgs(name: string, args: any): void {
       }
       break;
 
+    case 'get_diagnostics':
+      if (typeof args.file_path !== 'string') {
+        throw new Error('Invalid file_path: must be a string');
+      }
+      if (args.force_refresh !== undefined && typeof args.force_refresh !== 'boolean') {
+        throw new Error('Invalid force_refresh: must be a boolean');
+      }
+      break;
+
+    case 'get_call_hierarchy':
+    case 'get_type_hierarchy':
+      if (typeof args.file_path !== 'string') {
+        throw new Error('Invalid file_path: must be a string');
+      }
+      if (typeof args.line !== 'number' || !Number.isInteger(args.line) || args.line < 0) {
+        throw new Error('Invalid line: must be a non-negative integer');
+      }
+      if (typeof args.column !== 'number' || !Number.isInteger(args.column) || args.column < 0) {
+        throw new Error('Invalid column: must be a non-negative integer');
+      }
+      break;
+
     default:
       // Unknown tool, will be caught by the switch below
       break;
@@ -107,6 +133,16 @@ async function ensureClangdInitialized(): Promise<void> {
       await clangdManager.start();
 
       fileTracker = new FileTracker(clangdManager.getClient());
+
+      // Initialize diagnostics cache
+      diagnosticsCache = new DiagnosticsCache(clangdManager.getClient());
+
+      // Hook diagnostics cache to file tracker eviction
+      fileTracker.onFileClosed((uri) => {
+        if (diagnosticsCache) {
+          diagnosticsCache.clearForFile(uri);
+        }
+      });
 
       logger.info('Clangd initialization complete');
     } finally {
@@ -265,6 +301,69 @@ async function main() {
             },
             required: ['file_path']
           }
+        },
+        {
+          name: 'get_diagnostics',
+          description: 'Get diagnostics (errors, warnings, notes) for a file',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file_path: {
+                type: 'string',
+                description: 'Absolute path to the source file'
+              },
+              force_refresh: {
+                type: 'boolean',
+                description: 'Force re-parsing of the file to get latest diagnostics (default: false)',
+                default: false
+              }
+            },
+            required: ['file_path']
+          }
+        },
+        {
+          name: 'get_call_hierarchy',
+          description: 'Get call hierarchy showing incoming callers and outgoing callees for a function',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file_path: {
+                type: 'string',
+                description: 'Absolute path to the source file'
+              },
+              line: {
+                type: 'number',
+                description: 'Line number (0-indexed)'
+              },
+              column: {
+                type: 'number',
+                description: 'Column number (0-indexed)'
+              }
+            },
+            required: ['file_path', 'line', 'column']
+          }
+        },
+        {
+          name: 'get_type_hierarchy',
+          description: 'Get type hierarchy showing base classes (supertypes) and derived classes (subtypes)',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file_path: {
+                type: 'string',
+                description: 'Absolute path to the source file'
+              },
+              line: {
+                type: 'number',
+                description: 'Line number (0-indexed)'
+              },
+              column: {
+                type: 'number',
+                description: 'Column number (0-indexed)'
+              }
+            },
+            required: ['file_path', 'line', 'column']
+          }
         }
       ]
     };
@@ -359,6 +458,47 @@ async function main() {
             clangdManager.getClient(),
             fileTracker,
             args.file_path as string
+          );
+          return {
+            content: [{ type: 'text', text: result }]
+          };
+        }
+
+        case 'get_diagnostics': {
+          if (!diagnosticsCache) {
+            throw new Error('Diagnostics cache not initialized');
+          }
+          const result = await getDiagnostics(
+            diagnosticsCache,
+            fileTracker,
+            args.file_path as string,
+            args.force_refresh === true
+          );
+          return {
+            content: [{ type: 'text', text: result }]
+          };
+        }
+
+        case 'get_call_hierarchy': {
+          const result = await getCallHierarchy(
+            clangdManager.getClient(),
+            fileTracker,
+            args.file_path as string,
+            args.line as number,
+            args.column as number
+          );
+          return {
+            content: [{ type: 'text', text: result }]
+          };
+        }
+
+        case 'get_type_hierarchy': {
+          const result = await getTypeHierarchy(
+            clangdManager.getClient(),
+            fileTracker,
+            args.file_path as string,
+            args.line as number,
+            args.column as number
           );
           return {
             content: [{ type: 'text', text: result }]

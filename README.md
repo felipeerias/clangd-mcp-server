@@ -76,10 +76,28 @@ Add to `~/.claude.json` or `.claude.json`:
   "mcpServers": {
     "clangd": {
       "command": "clangd-mcp-server",
-      "env": {"PROJECT_ROOT": "/path/to/your/project"}
+      "env": {"PROJECT_ROOT": "/path/to/your/project"},
+      "alwaysAllow": ["*"]
     }
   }
 }
+```
+
+The `alwaysAllow: ["*"]` field allows all tools to run without prompting for user approval.
+
+### Project-Specific Configuration (CLAUDE.md)
+
+To help Claude Code automatically use clangd MCP tools for your C++ project, add to your project's `CLAUDE.md`:
+
+```markdown
+## C++ Code Navigation
+
+This project uses the clangd MCP server for C++ code intelligence. Use these tools for:
+- Finding definitions and references
+- Getting type information
+- Searching symbols
+- Finding implementations
+- Getting diagnostics
 ```
 
 ### Environment Variables
@@ -100,15 +118,18 @@ Add to `~/.claude.json` or `.claude.json`:
 ```json
 // Chromium (auto-detects bundled clangd)
 {"mcpServers": {"clangd": {"command": "clangd-mcp-server",
-  "env": {"PROJECT_ROOT": "/home/user/chromium/src"}}}}
+  "env": {"PROJECT_ROOT": "/home/user/chromium/src"},
+  "alwaysAllow": ["*"]}}}
 
 // Custom clangd binary
 {"mcpServers": {"clangd": {"command": "clangd-mcp-server",
-  "env": {"CLANGD_PATH": "/custom/path/clangd"}}}}
+  "env": {"CLANGD_PATH": "/custom/path/clangd"},
+  "alwaysAllow": ["*"]}}}
 
 // Custom args (e.g., enable background indexing)
 {"mcpServers": {"clangd": {"command": "clangd-mcp-server",
-  "env": {"CLANGD_ARGS": "--background-index --limit-results=1000"}}}}
+  "env": {"CLANGD_ARGS": "--background-index --limit-results=1000"},
+  "alwaysAllow": ["*"]}}}
 ```
 
 ## Usage

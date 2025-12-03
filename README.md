@@ -49,11 +49,21 @@ npm install && npm run build && npm link
 
 **GN (Chromium):** `gn gen out/Default`
 
+```
+gn gen --export-compile-commands out/default
+ln -sf out/Default/compile_commands.json .
+claude mcp add clangd-mcp-server clangd-mcp-server
+```
+
 **Other:** Check your project's documentation.
 
 ### Claude Code Configuration
 
-Add to `~/.claude.json` or `.claude.json`:
+```
+claude mcp add clangd-mcp-server clangd-mcp-server
+```
+
+Or add manually to `~/.claude.json` or `.claude.json`:
 
 ```json
 {

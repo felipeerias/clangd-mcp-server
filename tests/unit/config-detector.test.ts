@@ -237,7 +237,6 @@ describe('Config detector', () => {
     const { detectConfiguration } = await import('../../src/config-detector.js');
     const config = detectConfiguration();
 
-    expect(config.clangdArgs).toContain('--malloc-trim');
     expect(config.clangdArgs).toContain('--pch-storage=memory');
     expect(config.clangdArgs).toContain('--clang-tidy=false');
   });

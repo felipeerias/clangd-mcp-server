@@ -273,11 +273,6 @@ function generateClangdArgs(isChromiumProject: boolean, compileCommandsPath?: st
     args.push('--limit-results=1000');
   }
 
-  // Always enable malloc trim for long-running instances
-  if (!args.some(arg => arg.includes('malloc-trim'))) {
-    args.push('--malloc-trim');
-  }
-
   // Improve performance
   if (!args.some(arg => arg.startsWith('--pch-storage'))) {
     args.push('--pch-storage=memory');

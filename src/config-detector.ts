@@ -2,10 +2,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import { existsSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { logger } from './utils/logger.js';
+import { CompilationDatabase, findDatabaseInDirectory, normalizePathKey } from './compilation-database.js';
 
 export interface ClangdConfig {
   clangdPath: string;
@@ -14,6 +15,28 @@ export interface ClangdConfig {
   compileCommandsPath?: string;
   isChromiumProject: boolean;
 }
+
+/**
+ * Workspace-wide settings shared by every clangd instance.
+ *
+ * A workspace may hold several independent projects, so the compilation
+ * database is intentionally not part of this object: it is resolved per file
+ * and folded into a per-instance ClangdConfig by buildInstanceConfig().
+ */
+export interface WorkspaceConfig {
+  clangdPath: string;
+  /** Arguments common to all instances; excludes --compile-commands-dir. */
+  baseArgs: string[];
+  /** Project roots, most specific first. Always contains at least one entry. */
+  projectRoots: string[];
+  /** COMPILE_COMMANDS_DIR override, applied to every file when set. */
+  explicitDatabaseDir?: string;
+  /** Upper bound on concurrently running clangd instances. */
+  maxInstances: number;
+  isChromiumProject: boolean;
+}
+
+const DEFAULT_MAX_INSTANCES = 8;
 
 /**
  * Detect if project is a Chromium project by checking for bundled clangd
@@ -78,22 +101,13 @@ function findProjectBundledClangd(projectRoot: string, isChromiumProject: boolea
 }
 
 /**
- * Detect project configuration and generate appropriate clangd settings
+ * Resolve the clangd binary to use, preferring an explicit override, then a
+ * project-bundled binary, then whatever is on PATH.
  */
-export function detectConfiguration(): ClangdConfig {
-  // Get project root from environment or use cwd
-  const projectRoot = resolve(process.env.PROJECT_ROOT || process.cwd());
-  logger.info('Project root:', projectRoot);
-
-  // Check if this is a Chromium project using multiple detection strategies
-  const isChromiumProject = detectChromiumProject(projectRoot);
-  if (isChromiumProject) {
-    logger.info('Detected Chromium project');
-  }
-
-  // Find clangd binary
+function resolveClangdPath(projectRoot: string, isChromiumProject: boolean): string {
   let clangdPath: string;
   let projectClangd: string | undefined;
+
   if (process.env.CLANGD_PATH) {
     clangdPath = process.env.CLANGD_PATH;
     logger.info('Using clangd from CLANGD_PATH:', clangdPath);
@@ -118,7 +132,7 @@ export function detectConfiguration(): ClangdConfig {
     logger.info(`Clangd version: ${version}`);
 
     // Warn if using old system clangd for Chromium
-    if (isChromiumProject && !projectClangd && version) {
+    if (isChromiumProject && !projectClangd) {
       const majorVersion = parseInt(version.split('.')[0]);
       if (majorVersion < 20) {
         logger.warn(`Using older system clangd (${version}) for Chromium project. Consider using the bundled clangd (v22+) via CLANGD_PATH`);
@@ -127,6 +141,25 @@ export function detectConfiguration(): ClangdConfig {
   } else {
     logger.warn('Could not detect clangd version');
   }
+
+  return clangdPath;
+}
+
+/**
+ * Detect project configuration and generate appropriate clangd settings
+ */
+export function detectConfiguration(): ClangdConfig {
+  // Get project root from environment or use cwd
+  const projectRoot = resolve(process.env.PROJECT_ROOT || process.cwd());
+  logger.info('Project root:', projectRoot);
+
+  // Check if this is a Chromium project using multiple detection strategies
+  const isChromiumProject = detectChromiumProject(projectRoot);
+  if (isChromiumProject) {
+    logger.info('Detected Chromium project');
+  }
+
+  const clangdPath = resolveClangdPath(projectRoot, isChromiumProject);
 
   // Find compile_commands.json
   const compileCommandsPath = findCompileCommands(projectRoot);
@@ -161,24 +194,222 @@ function findCompileCommands(projectRoot: string): string | undefined {
     }
   }
 
-  // Search standard locations
-  const searchPaths = [
-    'compile_commands.json',
-    'build/compile_commands.json',
-    'out/Default/compile_commands.json',
-    'out/Release/compile_commands.json',
-    'out/Debug/compile_commands.json',
-    '.build/compile_commands.json'
-  ];
+  const database = findDatabaseInDirectory(projectRoot);
+  return database?.path;
+}
 
-  for (const searchPath of searchPaths) {
-    const fullPath = join(projectRoot, searchPath);
-    if (existsSync(fullPath)) {
-      return fullPath;
+/**
+ * Strip // and /* *\/ comments so VS Code .code-workspace files (JSONC) parse.
+ * Comment markers inside string literals are preserved.
+ */
+function stripJsonComments(text: string): string {
+  let out = '';
+  let inString = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (inLineComment) {
+      if (char === '\n') {
+        inLineComment = false;
+        out += char;
+      }
+      continue;
     }
+
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+
+    if (inString) {
+      out += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      out += char;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+
+    if (char === '/' && next === '*') {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+
+    out += char;
   }
 
-  return undefined;
+  return out;
+}
+
+/**
+ * Read the folder list out of a VS Code .code-workspace file.
+ * Relative folder paths are resolved against the workspace file's directory.
+ */
+export function readWorkspaceFileFolders(workspaceFile: string): string[] {
+  const absolute = resolve(workspaceFile);
+  if (!existsSync(absolute)) {
+    logger.warn('WORKSPACE_FILE does not exist:', absolute);
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(stripJsonComments(readFileSync(absolute, 'utf-8')));
+    const folders = Array.isArray(parsed?.folders) ? parsed.folders : [];
+    const base = dirname(absolute);
+
+    return folders
+      .map((folder: any) => (typeof folder?.path === 'string' ? folder.path : undefined))
+      .filter((path: string | undefined): path is string => Boolean(path))
+      .map((path: string) => (isAbsolute(path) ? resolve(path) : resolve(base, path)));
+  } catch (error) {
+    logger.warn(`Failed to read workspace file ${absolute}:`, error);
+    return [];
+  }
+}
+
+/** Split a user-supplied path list. ';' works everywhere; ':' is POSIX-only. */
+function splitPathList(value: string): string[] {
+  const separator = process.platform === 'win32' ? /;/ : /[;:]/;
+  return value
+    .split(separator)
+    .map(entry => entry.trim())
+    .filter(entry => entry.length > 0);
+}
+
+/**
+ * Collect the project roots this server should serve, in priority order:
+ * PROJECT_ROOT, then PROJECT_ROOTS, then the folders of WORKSPACE_FILE,
+ * falling back to the current working directory.
+ */
+export function detectProjectRoots(): string[] {
+  const candidates: string[] = [];
+
+  if (process.env.PROJECT_ROOT) {
+    candidates.push(resolve(process.env.PROJECT_ROOT));
+  }
+  if (process.env.PROJECT_ROOTS) {
+    candidates.push(...splitPathList(process.env.PROJECT_ROOTS).map(entry => resolve(entry)));
+  }
+  if (process.env.WORKSPACE_FILE) {
+    candidates.push(...readWorkspaceFileFolders(process.env.WORKSPACE_FILE));
+  }
+  if (candidates.length === 0) {
+    candidates.push(resolve(process.cwd()));
+  }
+
+  const seen = new Set<string>();
+  const roots: string[] = [];
+
+  for (const candidate of candidates) {
+    const key = normalizePathKey(candidate);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    try {
+      if (!statSync(candidate).isDirectory()) {
+        logger.warn('Ignoring project root that is not a directory:', candidate);
+        continue;
+      }
+    } catch {
+      logger.warn('Ignoring project root that does not exist:', candidate);
+      continue;
+    }
+
+    roots.push(candidate);
+  }
+
+  // Every candidate was invalid; cwd keeps the server usable.
+  return roots.length > 0 ? roots : [resolve(process.cwd())];
+}
+
+/**
+ * Detect workspace-wide configuration shared by all clangd instances.
+ */
+export function detectWorkspaceConfiguration(): WorkspaceConfig {
+  const projectRoots = detectProjectRoots();
+  logger.info(`Project roots (${projectRoots.length}):`, projectRoots.join(', '));
+
+  const primaryRoot = projectRoots[0];
+  const isChromiumProject = projectRoots.some(root => detectChromiumProject(root));
+  if (isChromiumProject) {
+    logger.info('Detected Chromium project');
+  }
+
+  const clangdPath = resolveClangdPath(primaryRoot, isChromiumProject);
+  const maxInstances = readMaxInstances();
+
+  return {
+    clangdPath,
+    baseArgs: generateClangdArgs(isChromiumProject),
+    projectRoots,
+    explicitDatabaseDir: process.env.COMPILE_COMMANDS_DIR
+      ? resolve(process.env.COMPILE_COMMANDS_DIR)
+      : undefined,
+    maxInstances,
+    isChromiumProject,
+  };
+}
+
+function readMaxInstances(): number {
+  const raw = process.env.CLANGD_MAX_INSTANCES;
+  if (!raw) {
+    return DEFAULT_MAX_INSTANCES;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    logger.warn(`Invalid CLANGD_MAX_INSTANCES '${raw}', using ${DEFAULT_MAX_INSTANCES}`);
+    return DEFAULT_MAX_INSTANCES;
+  }
+  return parsed;
+}
+
+/**
+ * Build the configuration for one clangd instance bound to a single database.
+ */
+export function buildInstanceConfig(
+  workspace: WorkspaceConfig,
+  projectRoot: string,
+  database?: CompilationDatabase
+): ClangdConfig {
+  const clangdArgs = [...workspace.baseArgs];
+  if (database) {
+    clangdArgs.unshift(`--compile-commands-dir=${database.directory}`);
+  }
+
+  return {
+    clangdPath: workspace.clangdPath,
+    clangdArgs,
+    projectRoot,
+    compileCommandsPath: database?.path,
+    isChromiumProject: workspace.isChromiumProject,
+  };
 }
 
 /**
@@ -273,8 +504,9 @@ function generateClangdArgs(isChromiumProject: boolean, compileCommandsPath?: st
     args.push('--limit-results=1000');
   }
 
-  // Always enable malloc trim for long-running instances
-  if (!args.some(arg => arg.includes('malloc-trim'))) {
+  // Enable malloc trim for long-running instances.
+  // Not supported on Windows: clangd there rejects the flag and exits with code 1.
+  if (process.platform !== 'win32' && !args.some(arg => arg.includes('malloc-trim'))) {
     args.push('--malloc-trim');
   }
 

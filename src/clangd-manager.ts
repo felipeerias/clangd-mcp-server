@@ -7,6 +7,7 @@ import { logger } from './utils/logger.js';
 import { ClangdError } from './utils/errors.js';
 import { LSPClient } from './lsp-client.js';
 import { ClangdConfig } from './config-detector.js';
+import { pathToUri } from './utils/uri.js';
 
 interface InitializeResult {
   capabilities: any;
@@ -125,7 +126,9 @@ export class ClangdManager {
         name: 'clangd-mcp-server',
         version: '0.1.0'
       },
-      rootUri: `file://${this.config.projectRoot}`,
+      // pathToUri produces a well-formed URI on every platform. Naive string
+      // concatenation yields `file://C:\dir`, which clangd rejects on Windows.
+      rootUri: pathToUri(this.config.projectRoot),
       capabilities: {
         textDocument: {
           definition: { linkSupport: true },
@@ -285,5 +288,12 @@ export class ClangdManager {
    */
   isReady(): boolean {
     return this.initialized && !!this.process && this.process.exitCode === null;
+  }
+
+  /**
+   * Configuration this instance was started with
+   */
+  getConfig(): ClangdConfig {
+    return this.config;
   }
 }

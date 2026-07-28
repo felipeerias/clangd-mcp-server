@@ -36,12 +36,17 @@ type PendingRequest = {
   reject: (error: any) => void;
 };
 
+const HEADER_SEPARATOR = Buffer.from('\r\n\r\n', 'ascii');
+
 export class LSPClient {
   private stdin: Writable;
   private stdout: Readable;
   private nextId: number = 1;
   private pendingRequests: Map<number | string, PendingRequest> = new Map();
-  private buffer: string = '';
+  // Content-Length is a BYTE count, so the receive buffer must stay binary.
+  // Decoding to a JS string before framing desynchronizes the stream as soon as
+  // a message contains a non-ASCII character (clangd hover markdown uses U+2192).
+  private buffer: Buffer = Buffer.alloc(0);
   private notificationHandlers: Map<string, (params: any) => void> = new Map();
   private readonly maxMessageSize: number = 100 * 1024 * 1024; // 100 MB limit
   private dataHandler?: (chunk: Buffer) => void;
@@ -56,7 +61,7 @@ export class LSPClient {
 
   private setupStreamHandlers(): void {
     this.dataHandler = (chunk: Buffer) => {
-      this.buffer += chunk.toString('utf-8');
+      this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
       this.processBuffer();
     };
 
@@ -80,10 +85,18 @@ export class LSPClient {
 
   private processBuffer(): void {
     while (true) {
-      // Look for Content-Length header
-      const headerMatch = this.buffer.match(/Content-Length: (\d+)\r\n/);
-      if (!headerMatch) {
+      // Headers are ASCII and terminated by a blank line.
+      const headerEnd = this.buffer.indexOf(HEADER_SEPARATOR);
+      if (headerEnd === -1) {
         break;
+      }
+
+      const header = this.buffer.subarray(0, headerEnd).toString('ascii');
+      const headerMatch = header.match(/Content-Length:\s*(\d+)/i);
+      if (!headerMatch) {
+        logger.error('LSP header without Content-Length, skipping message:', header);
+        this.buffer = this.buffer.subarray(headerEnd + HEADER_SEPARATOR.length);
+        continue;
       }
 
       const contentLength = parseInt(headerMatch[1], 10);
@@ -97,32 +110,21 @@ export class LSPClient {
 
       if (contentLength < 0 || !Number.isFinite(contentLength)) {
         logger.error(`Invalid Content-Length: ${contentLength}, skipping message`);
-        // Skip to next potential message by removing the malformed header
-        const headerEnd = this.buffer.indexOf('\r\n\r\n');
-        if (headerEnd !== -1) {
-          this.buffer = this.buffer.substring(headerEnd + 4);
-        } else {
-          this.buffer = '';
-        }
+        this.buffer = this.buffer.subarray(headerEnd + HEADER_SEPARATOR.length);
         continue;
       }
 
-      const headerEnd = this.buffer.indexOf('\r\n\r\n');
-
-      if (headerEnd === -1) {
-        break;
-      }
-
-      const messageStart = headerEnd + 4;
+      const messageStart = headerEnd + HEADER_SEPARATOR.length;
       const messageEnd = messageStart + contentLength;
 
       if (this.buffer.length < messageEnd) {
-        // Not enough data yet
+        // Not enough bytes yet
         break;
       }
 
-      const messageText = this.buffer.substring(messageStart, messageEnd);
-      this.buffer = this.buffer.substring(messageEnd);
+      // Decode only a complete message, so multi-byte sequences are never split.
+      const messageText = this.buffer.toString('utf-8', messageStart, messageEnd);
+      this.buffer = this.buffer.subarray(messageEnd);
 
       try {
         const message = JSON.parse(messageText);

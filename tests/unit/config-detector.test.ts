@@ -237,7 +237,12 @@ describe('Config detector', () => {
     const { detectConfiguration } = await import('../../src/config-detector.js');
     const config = detectConfiguration();
 
-    expect(config.clangdArgs).toContain('--malloc-trim');
+    // clangd on Windows rejects --malloc-trim and exits, so it is POSIX-only.
+    if (process.platform === 'win32') {
+      expect(config.clangdArgs).not.toContain('--malloc-trim');
+    } else {
+      expect(config.clangdArgs).toContain('--malloc-trim');
+    }
     expect(config.clangdArgs).toContain('--pch-storage=memory');
     expect(config.clangdArgs).toContain('--clang-tidy=false');
   });

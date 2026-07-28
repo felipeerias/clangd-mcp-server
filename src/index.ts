@@ -12,25 +12,21 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { logger } from './utils/logger.js';
-import { detectConfiguration } from './config-detector.js';
-import { ClangdManager } from './clangd-manager.js';
-import { FileTracker } from './file-tracker.js';
+import { detectWorkspaceConfiguration } from './config-detector.js';
+import { ClangdPool, ClangdSession } from './clangd-pool.js';
 
 import { findDefinition } from './tools/find-definition.js';
 import { findReferences } from './tools/find-references.js';
 import { getHover } from './tools/get-hover.js';
-import { workspaceSymbolSearch } from './tools/workspace-symbol.js';
+import { workspaceSymbolSearchMulti } from './tools/workspace-symbol.js';
 import { findImplementations } from './tools/find-implementations.js';
 import { getDocumentSymbols } from './tools/document-symbols.js';
-import { getDiagnostics, DiagnosticsCache } from './tools/get-diagnostics.js';
+import { getDiagnostics } from './tools/get-diagnostics.js';
 import { getCallHierarchy } from './tools/get-call-hierarchy.js';
 import { getTypeHierarchy } from './tools/get-type-hierarchy.js';
 
 // Global state
-let clangdManager: ClangdManager | null = null;
-let fileTracker: FileTracker | null = null;
-let diagnosticsCache: DiagnosticsCache | null = null;
-let initializationPromise: Promise<void> | null = null;
+let pool: ClangdPool | null = null;
 let isShuttingDown: boolean = false;
 
 /**
@@ -104,54 +100,25 @@ function validateToolArgs(name: string, args: any): void {
 }
 
 /**
- * Initialize clangd (lazy initialization on first query)
- * Uses a lock to prevent concurrent initialization attempts
+ * Get the clangd pool, creating it on the first tool call.
+ * Workspace detection is cheap; clangd instances start lazily per project.
  */
-async function ensureClangdInitialized(): Promise<void> {
-  // Check if shutting down
+function getPool(): ClangdPool {
   if (isShuttingDown) {
     throw new Error('Server is shutting down');
   }
 
-  // Fast path: already initialized
-  if (clangdManager && clangdManager.isReady()) {
-    return;
+  if (!pool) {
+    logger.info('Detecting workspace configuration...');
+    pool = new ClangdPool(detectWorkspaceConfiguration());
   }
 
-  // If initialization is in progress, wait for it
-  if (initializationPromise) {
-    return initializationPromise;
-  }
+  return pool;
+}
 
-  // Start initialization with lock
-  initializationPromise = (async () => {
-    try {
-      logger.info('Initializing clangd...');
-
-      const config = detectConfiguration();
-      clangdManager = new ClangdManager(config);
-      await clangdManager.start();
-
-      fileTracker = new FileTracker(clangdManager.getClient());
-
-      // Initialize diagnostics cache
-      diagnosticsCache = new DiagnosticsCache(clangdManager.getClient());
-
-      // Hook diagnostics cache to file tracker eviction
-      fileTracker.onFileClosed((uri) => {
-        if (diagnosticsCache) {
-          diagnosticsCache.clearForFile(uri);
-        }
-      });
-
-      logger.info('Clangd initialization complete');
-    } finally {
-      // Release lock after completion (success or failure)
-      initializationPromise = null;
-    }
-  })();
-
-  return initializationPromise;
+/** Resolve the clangd session that owns a file's compilation database. */
+async function sessionForFile(filePath: string): Promise<ClangdSession> {
+  return getPool().getSessionForFile(filePath);
 }
 
 /**
@@ -364,6 +331,19 @@ async function main() {
             },
             required: ['file_path', 'line', 'column']
           }
+        },
+        {
+          name: 'list_projects',
+          description: 'List the C++ projects in the workspace, the compile_commands.json resolved for each, and whether clangd is running for it. Pass file_path to see which project a specific file resolves to.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              file_path: {
+                type: 'string',
+                description: 'Optional absolute path to a source file; reports the project that owns it'
+              }
+            }
+          }
         }
       ]
     };
@@ -372,27 +352,18 @@ async function main() {
   // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
-      const { name, arguments: args } = request.params;
-
-      if (!args) {
-        throw new Error('Missing arguments for tool call');
-      }
-
+      const { name } = request.params;
+      // list_projects takes no required arguments, so an omitted object is fine.
+      const args = request.params.arguments ?? {};
       // Validate arguments before initialization
       validateToolArgs(name, args);
 
-      // Initialize clangd on first tool call
-      await ensureClangdInitialized();
-
-      if (!clangdManager || !fileTracker) {
-        throw new Error('Clangd not initialized');
-      }
-
       switch (name) {
         case 'find_definition': {
+          const session = await sessionForFile(args.file_path as string);
           const result = await findDefinition(
-            clangdManager.getClient(),
-            fileTracker,
+            session.manager.getClient(),
+            session.fileTracker,
             args.file_path as string,
             args.line as number,
             args.column as number
@@ -403,9 +374,10 @@ async function main() {
         }
 
         case 'find_references': {
+          const session = await sessionForFile(args.file_path as string);
           const result = await findReferences(
-            clangdManager.getClient(),
-            fileTracker,
+            session.manager.getClient(),
+            session.fileTracker,
             args.file_path as string,
             args.line as number,
             args.column as number,
@@ -417,9 +389,10 @@ async function main() {
         }
 
         case 'get_hover': {
+          const session = await sessionForFile(args.file_path as string);
           const result = await getHover(
-            clangdManager.getClient(),
-            fileTracker,
+            session.manager.getClient(),
+            session.fileTracker,
             args.file_path as string,
             args.line as number,
             args.column as number
@@ -430,8 +403,12 @@ async function main() {
         }
 
         case 'workspace_symbol_search': {
-          const result = await workspaceSymbolSearch(
-            clangdManager.getClient(),
+          const sessions = await getPool().getSessionsForWorkspace();
+          const result = await workspaceSymbolSearchMulti(
+            sessions.map(session => ({
+              projectRoot: session.projectRoot,
+              lspClient: session.manager.getClient()
+            })),
             args.query as string,
             (args.limit as number) || 100
           );
@@ -441,9 +418,10 @@ async function main() {
         }
 
         case 'find_implementations': {
+          const session = await sessionForFile(args.file_path as string);
           const result = await findImplementations(
-            clangdManager.getClient(),
-            fileTracker,
+            session.manager.getClient(),
+            session.fileTracker,
             args.file_path as string,
             args.line as number,
             args.column as number
@@ -454,9 +432,10 @@ async function main() {
         }
 
         case 'get_document_symbols': {
+          const session = await sessionForFile(args.file_path as string);
           const result = await getDocumentSymbols(
-            clangdManager.getClient(),
-            fileTracker,
+            session.manager.getClient(),
+            session.fileTracker,
             args.file_path as string
           );
           return {
@@ -465,12 +444,10 @@ async function main() {
         }
 
         case 'get_diagnostics': {
-          if (!diagnosticsCache) {
-            throw new Error('Diagnostics cache not initialized');
-          }
+          const session = await sessionForFile(args.file_path as string);
           const result = await getDiagnostics(
-            diagnosticsCache,
-            fileTracker,
+            session.diagnosticsCache,
+            session.fileTracker,
             args.file_path as string,
             args.force_refresh === true
           );
@@ -480,9 +457,10 @@ async function main() {
         }
 
         case 'get_call_hierarchy': {
+          const session = await sessionForFile(args.file_path as string);
           const result = await getCallHierarchy(
-            clangdManager.getClient(),
-            fileTracker,
+            session.manager.getClient(),
+            session.fileTracker,
             args.file_path as string,
             args.line as number,
             args.column as number
@@ -493,15 +471,38 @@ async function main() {
         }
 
         case 'get_type_hierarchy': {
+          const session = await sessionForFile(args.file_path as string);
           const result = await getTypeHierarchy(
-            clangdManager.getClient(),
-            fileTracker,
+            session.manager.getClient(),
+            session.fileTracker,
             args.file_path as string,
             args.line as number,
             args.column as number
           );
           return {
             content: [{ type: 'text', text: result }]
+          };
+        }
+
+        case 'list_projects': {
+          if (typeof args.file_path === 'string' && args.file_path.length > 0) {
+            const session = await sessionForFile(args.file_path);
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  file_path: args.file_path,
+                  project_root: session.projectRoot,
+                  compile_commands: session.database?.path ?? null,
+                  compile_commands_dir: session.database?.directory ?? null,
+                  clangd_args: session.manager.getConfig().clangdArgs
+                }, null, 2)
+              }]
+            };
+          }
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify(getPool().describe(), null, 2) }]
           };
         }
 
@@ -536,11 +537,8 @@ async function main() {
     logger.info(`Received ${signal}, shutting down...`);
 
     try {
-      if (fileTracker) {
-        fileTracker.closeAll();
-      }
-      if (clangdManager) {
-        await clangdManager.shutdown();
+      if (pool) {
+        await pool.shutdownAll();
       }
       process.exit(0);
     } catch (error) {
@@ -551,6 +549,9 @@ async function main() {
 
   process.on('SIGINT', () => shutdownHandler('SIGINT'));
   process.on('SIGTERM', () => shutdownHandler('SIGTERM'));
+  // VS Code and other MCP hosts stop a stdio server by closing its stdin.
+  // Without this the clangd children would outlive the server process.
+  process.stdin.on('close', () => void shutdownHandler('stdin close'));
 
   // Start server with stdio transport
   const transport = new StdioServerTransport();

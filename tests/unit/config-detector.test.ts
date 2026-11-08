@@ -237,9 +237,15 @@ describe('Config detector', () => {
     const { detectConfiguration } = await import('../../src/config-detector.js');
     const config = detectConfiguration();
 
-    expect(config.clangdArgs).toContain('--malloc-trim');
     expect(config.clangdArgs).toContain('--pch-storage=memory');
     expect(config.clangdArgs).toContain('--clang-tidy=false');
+    // --malloc-trim requires glibc malloc_trim; official Windows clangd builds
+    // do not register the flag and would exit on it (see config-detector.ts).
+    if (process.platform !== 'win32') {
+      expect(config.clangdArgs).toContain('--malloc-trim');
+    } else {
+      expect(config.clangdArgs).not.toContain('--malloc-trim');
+    }
   });
 
   it('should use CLANGD_LOG_LEVEL for log argument', async () => {

@@ -273,9 +273,16 @@ function generateClangdArgs(isChromiumProject: boolean, compileCommandsPath?: st
     args.push('--limit-results=1000');
   }
 
-  // Always enable malloc trim for long-running instances
-  if (!args.some(arg => arg.includes('malloc-trim'))) {
-    args.push('--malloc-trim');
+  // 修改原因：上游无条件追加 `--malloc-trim`，但 Windows 版 clangd（LLVM 官方
+  // 构建，malloc_trim 不可用）不注册该选项，进程启动即
+  // "Unknown command line argument '--malloc-trim'" 退出，表现为
+  // "Clangd process failed to start"。此处按平台跳过（Linux 保留原行为）。
+  // 修改日期：2026-11-07
+  if (process.platform !== 'win32') {
+    // Always enable malloc trim for long-running instances
+    if (!args.some(arg => arg.includes('malloc-trim'))) {
+      args.push('--malloc-trim');
+    }
   }
 
   // Improve performance

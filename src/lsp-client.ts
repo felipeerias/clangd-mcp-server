@@ -41,7 +41,14 @@ export class LSPClient {
   private stdout: Readable;
   private nextId: number = 1;
   private pendingRequests: Map<number | string, PendingRequest> = new Map();
-  private buffer: string = '';
+  // 修改原因：LSP 的 Content-Length 是**字节数**，原实现用 string 累加并按字符
+  // 下标切分。当响应含多字节 UTF-8（如 hover 的 markdown 内容）时，
+  // messageEnd = start + 字节数 > 字符串长度，substring 会越过本条消息
+  // 吞进下一条 → "Unexpected non-whitespace character after JSON"，
+  // 表现为 get_hover 永久超时（30s LSP 超时 + 60s 上层超时）。
+  // 改为 Buffer 累加 + 按字节切分，同时避免 chunk 边界截断多字节字符。
+  // 修改日期：2026-11-07
+  private buffer: Buffer = Buffer.alloc(0);
   private notificationHandlers: Map<string, (params: any) => void> = new Map();
   private readonly maxMessageSize: number = 100 * 1024 * 1024; // 100 MB limit
   private dataHandler?: (chunk: Buffer) => void;
@@ -56,7 +63,9 @@ export class LSPClient {
 
   private setupStreamHandlers(): void {
     this.dataHandler = (chunk: Buffer) => {
-      this.buffer += chunk.toString('utf-8');
+      // 修改原因：见 buffer 字段注释（按字节累加，避免多字节字符被 chunk 边界切断）。
+      // 修改日期：2026-11-07
+      this.buffer = Buffer.concat([this.buffer, chunk]);
       this.processBuffer();
     };
 
@@ -80,10 +89,20 @@ export class LSPClient {
 
   private processBuffer(): void {
     while (true) {
-      // Look for Content-Length header
-      const headerMatch = this.buffer.match(/Content-Length: (\d+)\r\n/);
-      if (!headerMatch) {
+      // 修改原因：全程在 Buffer 上按字节解析（见 buffer 字段注释）。
+      // 修改日期：2026-11-07
+      const headerEnd = this.buffer.indexOf('\r\n\r\n');
+      if (headerEnd === -1) {
         break;
+      }
+
+      const headerText = this.buffer.subarray(0, headerEnd).toString('latin1');
+      const headerMatch = headerText.match(/Content-Length:\s*(\d+)/i);
+      if (!headerMatch) {
+        // 缺 Content-Length 的头视为畸形，丢弃该段继续
+        logger.error('Missing Content-Length header, skipping malformed block');
+        this.buffer = this.buffer.subarray(headerEnd + 4);
+        continue;
       }
 
       const contentLength = parseInt(headerMatch[1], 10);
@@ -97,20 +116,8 @@ export class LSPClient {
 
       if (contentLength < 0 || !Number.isFinite(contentLength)) {
         logger.error(`Invalid Content-Length: ${contentLength}, skipping message`);
-        // Skip to next potential message by removing the malformed header
-        const headerEnd = this.buffer.indexOf('\r\n\r\n');
-        if (headerEnd !== -1) {
-          this.buffer = this.buffer.substring(headerEnd + 4);
-        } else {
-          this.buffer = '';
-        }
+        this.buffer = this.buffer.subarray(headerEnd + 4);
         continue;
-      }
-
-      const headerEnd = this.buffer.indexOf('\r\n\r\n');
-
-      if (headerEnd === -1) {
-        break;
       }
 
       const messageStart = headerEnd + 4;
@@ -121,14 +128,14 @@ export class LSPClient {
         break;
       }
 
-      const messageText = this.buffer.substring(messageStart, messageEnd);
-      this.buffer = this.buffer.substring(messageEnd);
+      const messageText = this.buffer.subarray(messageStart, messageEnd).toString('utf8');
+      this.buffer = this.buffer.subarray(messageEnd);
 
       try {
         const message = JSON.parse(messageText);
         this.handleMessage(message);
       } catch (error) {
-        logger.error('Failed to parse LSP message:', error, 'Message:', messageText);
+        logger.error('Failed to parse LSP message:', error);
       }
     }
   }
